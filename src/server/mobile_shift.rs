@@ -9,9 +9,13 @@
 //! For a mobile peer, a Shift held by key events is treated as one-shot: it is consumed by the
 //! next text input, or by a mouse button press once another key has used it. The caller then
 //! releases Shift on the host, and Shift is stripped from the peer's modifiers until the peer
-//! sends Shift again or reports it released. A Shift held without any key event (the toolbar
-//! toggle of the mobile client) is never touched, and neither is a Shift that is pressed and
-//! then used for a click directly.
+//! sends Shift again or reports it released. A Shift that is pressed and then used for a click
+//! directly is kept.
+//!
+//! The client also keeps that state across a reconnect, so a new connection can report Shift
+//! from its first event without any Shift key-down. Such a Shift, and a Shift reported on
+//! soft-keyboard text without a key-down, is stripped the same way. A Shift the user switches on
+//! later from the client's toolbar (no key event) is kept for clicks.
 
 use crate::input::{MOUSE_TYPE_DOWN, MOUSE_TYPE_MASK};
 use base::message_proto::{key_event, ControlKey, KeyEvent, KeyboardMode, MouseEvent};
@@ -25,6 +29,8 @@ pub(super) struct MobileShift {
     used: bool,
     // Shift was released here; the peer still reports it as a modifier.
     stale: bool,
+    // The connection has sent input before.
+    started: bool,
 }
 
 impl MobileShift {
@@ -32,6 +38,7 @@ impl MobileShift {
     /// `evt` when the held Shift has been consumed.
     pub fn on_key(&mut self, evt: &mut KeyEvent) -> Option<KeyEvent> {
         let down = evt.down || evt.press;
+        let first = !std::mem::replace(&mut self.started, true);
         if is_shift_key(evt) {
             self.held = down.then(|| evt.clone());
             self.used = false;
@@ -39,8 +46,14 @@ impl MobileShift {
             return None;
         }
         let release = if is_text(evt) {
+            if self.held.is_none() && has_shift(&evt.modifiers) {
+                self.stale = true;
+            }
             self.consume()
         } else {
+            if first && self.held.is_none() && has_shift(&evt.modifiers) {
+                self.stale = true;
+            }
             if down && self.held.is_some() {
                 self.used = true;
             }
@@ -53,6 +66,9 @@ impl MobileShift {
     /// Updates the state for a mouse event from the peer. Returns the key-up to inject before
     /// `evt` when the held Shift has been consumed.
     pub fn on_mouse(&mut self, evt: &mut MouseEvent) -> Option<KeyEvent> {
+        if !std::mem::replace(&mut self.started, true) && has_shift(&evt.modifiers) {
+            self.stale = true;
+        }
         let release = if evt.mask & MOUSE_TYPE_MASK == MOUSE_TYPE_DOWN && self.used {
             self.consume()
         } else {
@@ -75,11 +91,8 @@ impl MobileShift {
         if !self.stale {
             return;
         }
-        let shift = |ck: &EnumOrUnknown<ControlKey>| {
-            ck.value() == ControlKey::Shift.value() || ck.value() == ControlKey::RShift.value()
-        };
-        if modifiers.iter().any(shift) {
-            modifiers.retain(|ck| !shift(ck));
+        if has_shift(modifiers) {
+            modifiers.retain(|ck| !is_shift(ck));
         } else {
             // The peer no longer reports Shift: its state agrees with the host again.
             self.stale = false;
@@ -87,11 +100,17 @@ impl MobileShift {
     }
 }
 
+fn is_shift(ck: &EnumOrUnknown<ControlKey>) -> bool {
+    ck.value() == ControlKey::Shift.value() || ck.value() == ControlKey::RShift.value()
+}
+
+fn has_shift(modifiers: &[EnumOrUnknown<ControlKey>]) -> bool {
+    modifiers.iter().any(is_shift)
+}
+
 fn is_shift_key(evt: &KeyEvent) -> bool {
     match (&evt.union, evt.mode.enum_value_or(KeyboardMode::Legacy)) {
-        (Some(key_event::Union::ControlKey(ck)), _) => {
-            ck.value() == ControlKey::Shift.value() || ck.value() == ControlKey::RShift.value()
-        }
+        (Some(key_event::Union::ControlKey(ck)), _) => is_shift(ck),
         (Some(key_event::Union::Chr(code)), KeyboardMode::Map | KeyboardMode::Translate) => {
             matches!(
                 crate::keyboard::keycode_to_rdev_key(code & 0x0000FFFF),
@@ -156,10 +175,6 @@ mod tests {
         evt
     }
 
-    fn has_shift(modifiers: &[EnumOrUnknown<ControlKey>]) -> bool {
-        modifiers.contains(&ControlKey::Shift.into())
-    }
-
     #[test]
     fn soft_keyboard_text_releases_one_shot_shift() {
         let mut guard = MobileShift::default();
@@ -219,12 +234,48 @@ mod tests {
     fn toolbar_shift_is_kept() {
         // The toolbar toggle sends no key event, only the modifier.
         let mut guard = MobileShift::default();
-        let mut a = text_chr('a', true);
-        assert!(guard.on_key(&mut a).is_none());
-        assert!(has_shift(&a.modifiers));
+        guard.on_mouse(&mut mouse_down(false));
         let mut click = mouse_down(true);
         assert!(guard.on_mouse(&mut click).is_none());
         assert!(has_shift(&click.modifiers));
+    }
+
+    #[test]
+    fn new_connection_with_stale_shift_click() {
+        // Reconnect: the client still reports Shift, no Shift key-down on this connection.
+        let mut guard = MobileShift::default();
+        let mut click = mouse_down(true);
+        assert!(guard.on_mouse(&mut click).is_none());
+        assert!(
+            !has_shift(&click.modifiers),
+            "click must not be a Shift+click"
+        );
+        let mut b = text_chr('b', true);
+        assert!(guard.on_key(&mut b).is_none());
+        assert!(!has_shift(&b.modifiers));
+    }
+
+    #[test]
+    fn new_connection_with_stale_shift_text() {
+        let mut guard = MobileShift::default();
+        let mut b = text_chr('b', true);
+        assert!(guard.on_key(&mut b).is_none());
+        assert!(!has_shift(&b.modifiers));
+        let mut click = mouse_down(true);
+        guard.on_mouse(&mut click);
+        assert!(!has_shift(&click.modifiers));
+    }
+
+    #[test]
+    fn shift_on_text_without_key_down_is_stripped() {
+        let mut guard = MobileShift::default();
+        guard.on_mouse(&mut mouse_down(false));
+        let mut b = text_chr('b', true);
+        guard.on_key(&mut b);
+        assert!(!has_shift(&b.modifiers));
+        let mut click = mouse_down(true);
+        guard.on_mouse(&mut click);
+        assert!(!has_shift(&click.modifiers));
     }
 
     #[test]

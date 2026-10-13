@@ -3169,6 +3169,14 @@ impl Connection {
                         #[cfg(target_os = "macos")]
                         self.retina.on_mouse_event(&mut me, self.display_idx);
                         if self.is_mobile_peer() {
+                            if me.mask & crate::input::MOUSE_TYPE_MASK
+                                == crate::input::MOUSE_TYPE_DOWN
+                            {
+                                log::debug!(
+                                    "mobile input: mouse down, modifiers {:?}",
+                                    me.modifiers
+                                );
+                            }
                             if let Some(up) = self.mobile_shift.on_mouse(&mut me) {
                                 self.release_mobile_shift(up);
                             }
@@ -3298,6 +3306,21 @@ impl Connection {
                     }
                     if self.peer_keyboard_enabled() {
                         if self.is_mobile_peer() {
+                            // No characters: only the kind of key and the modifiers.
+                            log::debug!(
+                                "mobile input: key {} mode {:?} down {} press {}, modifiers {:?}",
+                                match &me.union {
+                                    Some(key_event::Union::ControlKey(ck)) => format!("{:?}", ck),
+                                    Some(key_event::Union::Chr(_)) => "chr".to_owned(),
+                                    Some(key_event::Union::Seq(_)) => "seq".to_owned(),
+                                    Some(key_event::Union::Unicode(_)) => "unicode".to_owned(),
+                                    _ => "other".to_owned(),
+                                },
+                                me.mode,
+                                me.down,
+                                me.press,
+                                me.modifiers
+                            );
                             if let Some(up) = self.mobile_shift.on_key(&mut me) {
                                 self.release_mobile_shift(up);
                             }
@@ -5644,6 +5667,7 @@ impl Connection {
     // Replays the key-up of a one-shot Shift from a mobile soft keyboard.
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     fn release_mobile_shift(&mut self, up: KeyEvent) {
+        log::debug!("mobile input: releasing one-shot Shift");
         if let Some(key_event::Union::Chr(code)) = up.union {
             self.pressed_modifiers
                 .remove(&crate::keyboard::keycode_to_rdev_key(code & 0x0000FFFF));
