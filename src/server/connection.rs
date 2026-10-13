@@ -426,6 +426,8 @@ pub struct Connection {
     options_in_login: Option<OptionMessage>,
     #[cfg(not(any(target_os = "ios")))]
     pressed_modifiers: HashSet<rdev::Key>,
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    mobile_shift: super::mobile_shift::MobileShift,
     closed: bool,
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     start_cm_ipc_para: Option<StartCmIpcPara>,
@@ -632,6 +634,8 @@ impl Connection {
             options_in_login: None,
             #[cfg(not(any(target_os = "ios")))]
             pressed_modifiers: Default::default(),
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            mobile_shift: Default::default(),
             closed: false,
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             start_cm_ipc_para: Some(StartCmIpcPara {
@@ -3164,6 +3168,11 @@ impl Connection {
                         }
                         #[cfg(target_os = "macos")]
                         self.retina.on_mouse_event(&mut me, self.display_idx);
+                        if self.is_mobile_peer() {
+                            if let Some(up) = self.mobile_shift.on_mouse(&mut me) {
+                                self.release_mobile_shift(up);
+                            }
+                        }
                         self.input_mouse(
                             me,
                             self.inner.id(),
@@ -3283,11 +3292,16 @@ impl Connection {
                     }
                 }
                 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-                Some(message::Union::KeyEvent(me)) => {
+                Some(message::Union::KeyEvent(mut me)) => {
                     if self.is_authed_view_camera_conn() {
                         return true;
                     }
                     if self.peer_keyboard_enabled() {
+                        if self.is_mobile_peer() {
+                            if let Some(up) = self.mobile_shift.on_key(&mut me) {
+                                self.release_mobile_shift(up);
+                            }
+                        }
                         if is_enter(&me) {
                             CLICK_TIME.store(get_time(), Ordering::SeqCst);
                         }
@@ -5619,6 +5633,22 @@ impl Connection {
                 }
             }
         }
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    fn is_mobile_peer(&self) -> bool {
+        let platform = self.lr.my_platform.to_lowercase();
+        platform == crate::PLATFORM_ANDROID.to_lowercase() || platform == "ios"
+    }
+
+    // Replays the key-up of a one-shot Shift from a mobile soft keyboard.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    fn release_mobile_shift(&mut self, up: KeyEvent) {
+        if let Some(key_event::Union::Chr(code)) = up.union {
+            self.pressed_modifiers
+                .remove(&crate::keyboard::keycode_to_rdev_key(code & 0x0000FFFF));
+        }
+        self.input_key(up, false);
     }
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]

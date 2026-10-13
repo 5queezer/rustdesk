@@ -2234,7 +2234,14 @@ fn legacy_keyboard_mode(evt: &KeyEvent) {
 
             process_unicode(&mut en, chr)
         }
-        Some(key_event::Union::Seq(ref seq)) => process_seq(&mut en, seq),
+        Some(key_event::Union::Seq(ref seq)) => {
+            // Same as Chr: the text is already composed (e.g. a word committed by a
+            // mobile soft keyboard), a Shift still held must not change its case.
+            #[cfg(target_os = "linux")]
+            release_shift_for_char_input(&mut en);
+
+            process_seq(&mut en, seq)
+        }
         _ => {}
     }
 

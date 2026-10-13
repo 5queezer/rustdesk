@@ -70,6 +70,8 @@ pub mod input_service {
 
 mod connection;
 mod login_failure_check;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+mod mobile_shift;
 pub(crate) mod port_forward_mux;
 pub mod display_service;
 #[cfg(windows)]
